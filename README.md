@@ -1,195 +1,243 @@
-# public-memo
+# Introduction
 
-# Agentic OS構築ガイド: Fable 5を本物の従業員にする方法（2026年7月版）
+You have the most capable model ever made generally available, and you are still typing prompts at it one at a time. This guide fixes that.
 
-## Introduction
+Here is the situation as of July 2026. Fable 5 can run for hours unattended, dispatch its own subagents, and do a week of work in a night. It is also metered ($10/M in, $50/M out through usage credits), it over-delivers when scope is not fenced, and it argues for its mistakes more convincingly than most people argue for their correct answers.
 
-あなたは人類史上最も強力なモデルを一般利用可能にしているのに、まだ1回ずつプロンプトを入力して使っています。このガイドはその問題を解決します。
+Used casually, it is an expensive way to generate impressive wrong things. Used inside a system, it is the closest thing to an employee you can rent for three dollars a day.
 
-2026年7月現在の状況：
+This guide builds that system. Not a philosophy of it: the actual files, in order, with a checkpoint after each so you know it works before you stack the next piece on top.
 
-- **Fable 5**は数時間無人稼働可能で、自律的にサブエージェントを呼び出し、1晩で1週間分の仕事をこなせます。
-- しかし高コスト（$10/M input, $50/M output）、スコープを制限しないと過剰出力、間違いを人間以上に説得力を持って主張します。
-- カジュアルに使うと「高価な印象的な間違い生成機」ですが、**システム内に組み込めば1日3ドルで雇える最も近い存在**になります。
+### What you will have at the end
+- A CLAUDE.md the model cannot negotiate with (BUILD 1)
+- A daily loop where Fable 5 makes every decision but writes almost no tokens, cheap models do the work, an independent verifier grades it, and a bash script holds the final vote (BUILDs 2-3)
+- A trust ledger that grants and revokes autonomy per skill, automatically, based on measured pass rates (BUILD 4)
+- A goals directory where everything you ever finish keeps getting re-verified daily, forever, so nothing rots silently (BUILD 5)
+- A budget that enforces itself instead of surprising you (BUILD 6)
+- Four optional loops (quorum, ratchet, sparring, compost) each with the condition that tells you when to install it (BUILD 7)
+- A cron schedule, a runbook for every alarm the system can raise, and a 30-day trust schedule that takes it from supervised to self-extending.
 
-このガイドはその**システム**を実際に構築します。哲学ではなく、具体的なファイル構成・順序・チェックポイント付きです。
+### Who this is for
+Anyone with a repo, a terminal, and a Claude Code subscription or API key. The examples are code-flavored because loops grew up around codebases, but the goal system and half the loops work on invoices, reports, and reading lists just as well; the predicates are just shell commands.
 
-### 完成後に手に入るもの
+### How to read it
+In order, doing the checks. BUILD 0 is the official Anthropic settings and prompt language; everything after it is the system built on top. Each build is 10 to 20 minutes. The 30 days at the end are not reading time; they are the graduated-trust schedule during which the system earns the right to run without you. Total hands-on time: about 2 hours.
 
-- モデルが交渉できないCLAUDE.md（BUILD 1）
-- Fable 5が決定を下し、安価モデルが実行、独立検証者が採点、bashスクリプトが最終判断する日常ループ（BUILD 2-3）
-- スキルごとの自動信頼度台帳（BUILD 4）
-- 完了した仕事が永続的に再検証されるGoalsディレクトリ（BUILD 5）
-- 自動執行される予算管理（BUILD 6）
-- 任意の追加ループ（Quorum, Ratchet, Sparring, Compost）（BUILD 7）
-- Cronスケジュール、アラーム対応runbook、30日間の段階的信頼獲得スケジュール
+### The three principles underneath everything
+- Laws, not tips. Every rule has a number, a never, or a command that checks it. Anything softer gets optimized away.
+- Nothing grades its own homework. The planner, the worker, the verifier, and the gate are four different parties, and the last one is deterministic.
+- Nothing that passed once goes unwatched. Finished work graduates into a re-verified invariant. A goal you only verify once is an assumption with a timestamp.
 
-**対象者**: リポジトリとターミナル、Claude Codeサブスク or APIキーを持っている人。  
-**読み方**: 順番に読みながら実際に構築。各BUILDは10〜20分程度。合計実作業時間約2時間。
+No essays from here on. Eight builds, each with files, commands, and a checkpoint.
 
-### 3つの基本原則
+---
 
-1. **Laws, not tips** — 全てのルールは数字・never・検証コマンドで表現。
-2. **Nothing grades its own homework** — Planner, Worker, Verifier, Gateは別。
-3. **Nothing that passed once goes unwatched** — 完了した仕事は永続的不変条件として再検証。
+## BUILD 0: Configure the Engine (from the official Fable 5 docs)
 
------
+Everything in this build comes from Anthropic's own documentation. Set these before writing any file of your own.
 
-**BUILD 0: Configure the Engine（Anthropic公式設定）**
+### Five official facts that change how you build
+- max_tokens is a hard cap on thinking PLUS response text. At high and xhigh, set it large (start at 64k) or Fable runs out of room mid-thought. Applies to every claude -p call in this guide.
+- xhigh is officially for "long-running agentic tasks (over 30 minutes) with token budgets in the millions." That is the conductor seat and nothing else in this system. The docs also say lower effort on Fable 5 "often exceeds xhigh performance on prior models," so resist upgrading workers.
+- Refusals are HTTP 200. Fable 5 runs safety classifiers (offensive cyber, biology/life-sciences, reasoning-extraction). A declined request returns stop_reason: "refusal" as a SUCCESS response. Your scripts must check the stop reason, not the exit code. Official remedy: configure server-side fallbacks or SDK middleware to re-route to Opus 4.8.
+- Never ask Fable to echo its reasoning. Prompts or skills that say "show your thinking" or "explain your reasoning in the response" trigger the reasoning_extraction refusal category and elevate fallbacks. Audit every old skill for this when migrating. Read the structured thinking blocks instead.
+- Turns are long by design. Hard tasks run many minutes per request at higher effort; autonomous runs extend for hours. Adjust client timeouts and check on runs asynchronously (scheduled jobs, not blocking waits). This is why the heartbeat is cron, not a blocking loop.
 
-Anthropic公式ドキュメントに基づく設定。
+### The official prompt pack
+Anthropic ships tested prompt language for Fable 5's known behaviors. These go into your prompts verbatim; do not paraphrase them thinner:
 
-#### 重要な5つの事実
+1. Anti-overplanning (for the conductor and any interactive session)
 
-- `max_tokens`は思考＋出力のハードリミット。高effort時は大きく設定（64k推奨）。
-- `xhigh`は長時間agenticタスク専用。
-- RefusalsはHTTP 200で返る（stop_reason: “refusal”を確認）。
-- 「show your thinking」系プロンプトは避ける（reasoning_extraction拒否トリガー）。
-- ターン長は長い。非同期処理前提。
+2. Anti-gold-plating (for every worker prompt; this is the official fence around over-delivery)
 
-#### 公式推奨プロンプト（そのまま使用）
+3. Grounded progress claims (for any long run; in Anthropic's testing this nearly eliminated fabricated status reports)
 
-（Anti-overplanning, Anti-gold-plating, Grounded progress claims, など詳細プロンプト群）
+4. Autonomous-pipeline reminder (for every cron-driven prompt; kills the "I'll now run X" early stop)
 
-**CHECK 0**: 全てのclaude -p呼び出しでmax_tokens明示、refusalチェック、thinking表示禁止。
+5. Official memory format (for the dreamer and memory/learnings/)
 
-**Part 2（BUILD 1〜BUILD 3）**
+6. Official verifier instruction (the docs state it directly: "separate, fresh-context verifier subagents tend to outperform self-critique")
 
------
+Two scaffolding orders from the docs worth obeying: start at the top of your difficulty range (testing Fable only on simple workloads undersells it; give it the hardest unsolved problem and let it scope), and refactor old skills (instructions written for prior models are often too prescriptive for Fable 5 and DEGRADE output; if default performance is better without an instruction, delete the instruction).
 
-## BUILD 1: The Constitution（CLAUDE.md）
+**CHECK 0:** Every claude -p call in your scripts has an explicit large max_tokens where supported; your scripts check for stop_reason: "refusal"; no prompt or skill anywhere says "show your thinking."
 
-**目的**: Fableは「laws」に従い、tipsを最適化してしまうため、全てを厳格なルール化。
+---
 
-- 150行以内
-- 数字・never・検証コマンド中心
-- 「think step by step」禁止
-- 事前定義ペルソナ禁止
+## BUILD 1: The Constitution (CLAUDE.md)
 
-**CLAUDE.md作成例**（実際のファイル内容は投稿を参照し、各自調整）:
+**Why, in one line:** Fable follows laws and optimizes around tips, so every line needs a number, a never, or a command that checks it.
 
-```markdown
-# CLAUDE.md - System Constitution
+Rules for the file: four blocks, under 150 lines, no "think step by step" (reasoning is always on; those are paid tokens), no predefined agent personas (Fable designs better teams than you can predefine), mostly stop signs.
 
-## Core Laws
-1. Never output more than X tokens without explicit approval.
-...
+```bash
+# Create CLAUDE.md
 ```
 
-**CHECK 1**: `wc -l CLAUDE.md` が15行未満になるよう厳格化。各行が「80%遵守して成功主張可能か？」を検証。
+Edit the numbers and paths to yours. Workflow-specific material (PR procedure, release checklist) goes in skills/, not here.
+
+**CHECK 1:** For every line ask: could the model comply 80% and claim success? If yes, rewrite it with a number or a never. `wc -l CLAUDE.md` under 150
 
 -----
 
 ## BUILD 2: Walls and Gate
 
-**目的**: 爆発範囲を事前宣言し、bashスクリプトが最終判断。
+**Why:** blast radius must be declared before the first tick, and a bash script must hold the final vote.
 
-**作成ファイル**:
+```bash
+# Create loop/contract.md
+```
 
-- `loop/contract.md`
-- `loop/guardrails/verify.sh`（リポジトリ状態検証スクリプト）
+```bash
+# Create loop/guardrails/verify.sh (edit for your stack)
+```
 
-**CHECK 2**: `./loop/guardrails/verify.sh` が正常終了（0）すること。失敗したらここを先に修正。
+**CHECK 2:** `./loop/guardrails/verify.sh` runs and exits 0 on your current repo. If it fails now, fix that first; the whole system stands on this script.
 
 -----
 
-## BUILD 3: The Heartbeat（日常ループ）
+## BUILD 3: The Heartbeat
 
-**目的**: Fableは高コストなので「決定のみ担当（10-20%トークン）」、実行は安価モデル、検証は別モデル。
+**Why, in three lines:** Fable as worker is a four-figure bill (500k-1M token sessions at $50/M out); Fable as conductor emits 10-20% of tokens while making 100% of decisions. A $0.01 model reads the quiet ticks. Agents hand off through a JSON schema so any model fits any seat.
 
-**主なファイル**:
+```bash
+# Create loop/triage.md
+```
 
-- `loop/triage.md`（振り分け）
-- `loop/conductor.md`（Fable 5用指揮者）
-- `loop/workers/implement.md`
-- `loop/workers/verify.md`
-- `loop/loop.sh`（メインスクリプト）
+```bash
+# Create loop/conductor.md
+```
 
-**exitコードの意味**:
+```bash
+# Create loop/workers/implement.md
+```
 
-- 0: quiet/done
-- 1: cap
-- 2: reroute
-- 3: budget
+```bash
+# Create loop/workers/verify.md
+```
 
-**CHECK 3**: `./loop.sh`を手動実行。静かなリポジトリはほぼ0円で終了、作業が必要ならwork-order.json生成。
+```bash
+# Create loop/loop.sh
+```
 
-**Part 3（BUILD 4〜BUILD 8 + 締めくくり）**  
-（最終パートです）
+Exit map: 0 quiet/done, 1 cap, 2 reroute, 3 budget. All labeled, on purpose.
+
+**CHECK 3:** `chmod +x loop.sh guardrails/verify.sh` then run `./loop.sh` once by hand. Confirm: a quiet repo exits 0 for about a penny; an actionable repo produces work-order.json with all five fields and a verdict line in STATE.md.
 
 -----
 
 ## BUILD 4: The Trust Ledger
 
-**目的**: スキルごとの信頼度を自動管理（20回以上・95%成功で自動化）。
+**Why:** “turn up autonomy as trust grows” is not a mechanism; a TSV with tier rules is. Autonomy is per skill, not per loop.
 
-- `loop/scripts/trust-log.sh`
-- 各スキルごとに `loop/skills/<name>/SKILL.md` 作成（frontmatter + neverリスト + done-when）
+```bash
+# Create loop/scripts/trust-log.sh
+```
 
-**CHECK 4**: デモでpass/failを繰り返し、tierが自動変更されることを確認。
+Tier rules: auto = 20+ runs AND 95%+ pass, ships unattended. queue = verified drafts wait for you. watch = under 10 runs or under 90%, draft-only. Demotion is automatic and prints to stderr, which cron mails to you.
+
+Seed the roster: create `loop/skills/<name>/SKILL.md` for each recurring chore (fix-lint-debt, fix-flaky-test, bump-deps, triage-issues are the standard four). Each file: frontmatter (name, description, when), steps, a “never” list, a verifiable done-when. Every skill starts at watch.
+
+**CHECK 4:** Run `./scripts/trust-log.sh demo pass` 21 times, then `--tier demo` prints auto. Log a fail on a 10+ run skill and see the ALERT on stderr. Reset: `> memory/trust.tsv`.
 
 -----
 
-## BUILD 5: Standing Goals + Goal Ledger
+## BUILD 5: Standing Goals + the Goal Ledger
 
-**目的**: 一度成功した仕事が腐らないよう、毎日再検証。
+**Why, in one line:** a goal you only verify once is an assumption with a timestamp, so finished goals graduate into invariants that are re-verified daily and logged.
 
-- `goals/<name>.md`（各完了作業ごとに1ファイル）
-- Predicateはシェルコマンド（exit 0 = 正常）
+```bash
+# Create one file per finished thing, goals/<name>.md
+```
 
-**作成スクリプト**: `loop/verify-goals.sh`
+Predicate rules: a command; exit 0 = invariant holds; cheap, deterministic, read-only. Adjectives are banned; if a shell script can’t check it, the checker can’t either. Non-code predicates work the same: `find invoices/overdue -mtime +45 | wc -l` prints 0, `test -s reports/$(date +%Y-%m)-review.md`.
 
-**CHECK 5**: 意図的に成功/失敗するgoalを追加して検証。
+```bash
+# Create loop/verify-goals.sh
+```
+
+Start the sentinel (detection only; fixes go through the normal pipeline):
+
+The graduation law is already in CLAUDE.md (BUILD 1): every passed /goal writes its own standing goal. Finishing IS the enrollment.
+
+**CHECK 5:** Add a goal with predicate: `true` and one with predicate: `false`. `./verify-goals.sh` exits 1, flips the second to VIOLATED, and both appear in the ledger. Delete the dummies.
 
 -----
 
 ## BUILD 6: The Budget
 
-**目的**: 予算が自動執行される仕組み。
+**Why:** daily cost = ticks × triage + hits × (conductor + worker + verifier). At real prices (triage $0.01, conductor $0.35, worker $0.10, verifier $0.40): a daily janitor is ~$2.56/day; a 15-minute babysitter with Fable in the triage seat is $34/day for the identical outcome. The model that reads the quiet ticks decides the bill.
 
-- `loop/scripts/log-cost.sh`
-- `loop/scripts/cost-check.sh`
+```bash
+# Create loop/scripts/log-cost.sh
+```
 
-**CHECK 6**: 1週間運用後にレポートが予算内に収まることを確認。
+```bash
+# Create loop/scripts/cost-check.sh
+```
+
+Rules that keep it flat: cadence is a cost decision (halving the interval doubles the floor); the quiet tick must cost cents; effort never above high in loops (xhigh is for one-shot reviews; effort is per step, not per run).
+
+**CHECK 6:** After a week of ticks, `./scripts/cost-check.sh --report` matches the formula within noise. Set `DAILY_BUDGET_USD` to a number you would not mind wasting.
 
 -----
 
-## BUILD 7: Optional Loops（必要に応じて追加）
+## BUILD 7: The Optional Loops (install when their condition appears)
 
-- **Quorum**: 複数廉価モデルで投票（Fable起動の閾値）
-- **Ratchet**: 単調改善保証
-- **Sparring**: Builder vs Breaker
-- **Compost**: 失敗から法則を生成（週1、人間承認必須）
+- **Quorum** (install when dispatch shows Fable wake-ups that produced action: stop). Three cheap models vote; Fable wakes on 2 of 3. Voters never see each other’s answers.
+- **Ratchet** (install when one number matters). Monotonic improvement or self-revert; the metric may not be gamed; the finished floor becomes a standing goal.
+- **Sparring** (install when you ship code daily). Builder and breaker, opposed; neither touches the other’s output; disputes go to you.
+- **Compost** (install always, weekly). Failures become laws; three proposals max; human signature required.
 
-**CHECK 7**: 各ループの導入条件をメモ。
+**CHECK 7:** Each optional loop has its install condition written next to it in your notes. Installing them speculatively is how systems bloat.
 
 -----
 
 ## BUILD 8: Ops
 
-- `Makefile`
-- Cron設定
-- Runbook（アラーム対応手順）
-- 30日間信頼獲得スケジュール（段階的に監督を減らす）
+```bash
+# Create Makefile
+```
 
-### The Rules（まとめ）
+**Cron, when Week 2 starts:**
 
-- Laws, not tips
-- Nothing grades its own homework
-- Nothing that passed once goes unwatched
-- など（投稿内の全ルール一覧）
+```bash
+# crontab example
+```
+
+### The 30-day trust schedule
+
+Do not skip graduations; each unlocks the next.
+
+### The runbook
+
+What each alarm means and what to do.
+
+### The Rules (print this)
+
+- Laws, not tips: a number, a never, or a command that checks it.
+- The conductor plans, workers execute, neither verifies. –allowedTools enforces it.
+- Agents talk in work orders. done_when = spec + stop condition + future invariant.
+- Spend effort where the loop branches. Never above high in a loop.
+- The quiet tick costs a penny or the loop costs a grand.
+- If a shell script couldn’t check it, don’t write it as a goal.
+- Goals graduate; they do not close. verify-goals.sh runs daily, forever.
+- Autonomy per skill: 20 runs, 95%, auto. Demotion automatic and loud.
+- Two ledgers: trust (workers) and goals (work). Read both with coffee.
+- Compute the metabolism before you cron.
+- Contract in the repo: acts-alone / queues / wakes-me.
+- Never iterate on output from a model you didn’t choose.
+- The sentinel detects; the pipeline fixes.
+- Quorum before waking Fable. Ratchet then weld. Spar daily. Compost weekly.
+- One graduation criterion at a time. Every month, delete something.
+- From the official docs: max_tokens caps thinking plus text, refusals are HTTP 200, never ask for echoed reasoning, old skills degrade Fable, and fresh-context verifiers beat self-critique. Anthropic says so; the system enforces it.
 
 ### Closing
 
-30日後には：
+Thirty days from now, if you did the checks: one loop ships boring work unattended, a goals directory re-verifies everything you ever finished, two ledgers tell you the truth about your workers and your work, and a weekly compost run proposes the system’s own next improvement for your signature.
 
-- 退屈な作業を無人実行
-- Goalsディレクトリによる永続検証
-- 2つの台帳による真実の可視化
-- システム自身が改善を提案する週次Compost
+The model was never the hard part. The hard part was building something around it that stays honest when you stop watching. That is what you just built.
 
-**最初の一歩**: 今夜からBUILD 2のverify.sh → BUILD 3の初回tick → 1つのstanding goal作成。
+Start tonight with the twenty minutes that proves it: BUILD 2’s verify.sh, BUILD 3’s first tick by hand, and one standing goal for the last thing you finished. The first time verify-goals.sh catches a silent regression on something you were sure was done, you will not need convincing about the rest.
 
------
-
-**Disclaimer**: 実際の運用は自己責任。コスト・安全性・API制限を十分考慮してください。
+**Disclaimer**
